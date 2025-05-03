@@ -8,7 +8,7 @@ use std::{cmp::min, collections::HashSet};
 pub struct HashKey<const N: usize>([u32; N]);
 
 #[derive(Clone, Copy)]
-pub struct Vector<const N: usize>([f32; N]);
+pub struct Vector<const N: usize>(pub [f32; N]);
 
 impl<const N: usize> Vector<N> {
     pub fn subtract_from(&self, vector: &Vector<N>) -> Vector<N> {
