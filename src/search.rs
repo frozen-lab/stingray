@@ -1,7 +1,8 @@
-use std::collections::HashSet;
-
+use dashmap::DashSet;
+use itertools::Itertools;
 use rand::seq::IndexedRandom;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use std::{cmp::min, collections::HashSet};
 
 #[derive(PartialEq, Eq, Hash)]
 pub struct HashKey<const N: usize>([u32; N]);
@@ -76,8 +77,8 @@ pub struct ANNIndex<const N: usize> {
 
 impl<const N: usize> ANNIndex<N> {
     fn build_hyperplane(
-        indexes: &Vec<usize>,
-        all_vecs: &Vec<Vector<N>>,
+        indexes: &[usize],
+        all_vecs: &[Vector<N>],
     ) -> (Hyperplane<N>, Vec<usize>, Vec<usize>) {
         let sample: Vec<_> = indexes.choose_multiple(&mut rand::rng(), 2).collect();
 
@@ -104,9 +105,9 @@ impl<const N: usize> ANNIndex<N> {
         (hyperplane, above, below)
     }
 
-    fn build_tree(max_size: usize, indexes: &Vec<usize>, all_vecs: &Vec<Vector<N>>) -> Node<N> {
+    fn build_tree(max_size: usize, indexes: &[usize], all_vecs: &Vec<Vector<N>>) -> Node<N> {
         if indexes.len() <= max_size {
-            return Node::Leaf(Box::new(LeafNode::<N>(indexes.clone())));
+            return Node::Leaf(Box::new(LeafNode::<N>(indexes.to_owned())));
         }
 
         let (hyperplane, above, below) = Self::build_hyperplane(indexes, all_vecs);
@@ -122,8 +123,8 @@ impl<const N: usize> ANNIndex<N> {
     }
 
     fn deduplicate(
-        vecs: &Vec<Vector<N>>,
-        ids: &Vec<i32>,
+        vecs: &[Vector<N>],
+        ids: &[i32],
         dedup_vecs: &mut Vec<Vector<N>>,
         dedup_ids: &mut Vec<i32>,
     ) {
@@ -140,11 +141,38 @@ impl<const N: usize> ANNIndex<N> {
         }
     }
 
+    fn tree_result(query: Vector<N>, n: i32, tree: &Node<N>, candidates: &DashSet<usize>) -> i32 {
+        match tree {
+            Node::Leaf(box_leaf) => {
+                let leaf_values = &(box_leaf.0);
+                let num_candidates_found = min(n as usize, leaf_values.len());
+
+                for item in leaf_values.iter().take(num_candidates_found) {
+                    candidates.insert(*item);
+                }
+
+                num_candidates_found as i32
+            }
+            Node::Inner(inner) => {
+                let above = (inner).hyperplane.point_is_above(&query);
+                let (main, backup) = match above {
+                    true => (&(inner.right_node), &(inner.left_node)),
+                    false => (&(inner.left_node), &(inner.right_node)),
+                };
+
+                match Self::tree_result(query, n, main, candidates) {
+                    k if k < n => k + Self::tree_result(query, n - k, backup, candidates),
+                    k => k,
+                }
+            }
+        }
+    }
+
     pub fn build_index(
         num_trees: usize,
         max_size: usize,
-        vecs: &Vec<Vector<N>>,
-        ids: &Vec<i32>,
+        vecs: &[Vector<N>],
+        ids: &[i32],
     ) -> ANNIndex<N> {
         let (mut unique_vecs, mut unique_ids) = (vec![], vec![]);
         Self::deduplicate(vecs, ids, &mut unique_vecs, &mut unique_ids);
@@ -160,5 +188,21 @@ impl<const N: usize> ANNIndex<N> {
             trees,
             ids: unique_ids,
         }
+    }
+
+    pub fn search_approximate(&self, query: Vector<N>, top_k: i32) -> Vec<(i32, f32)> {
+        let candidates = DashSet::new();
+
+        self.trees.par_iter().for_each(|tree| {
+            Self::tree_result(query, top_k, tree, &candidates);
+        });
+
+        candidates
+            .into_iter()
+            .map(|idx| (idx, self.values[idx].sq_euc_dis(&query)))
+            .sorted_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .take(top_k as usize)
+            .map(|(idx, dis)| (self.ids[idx], dis))
+            .collect()
     }
 }
